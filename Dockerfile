@@ -1,63 +1,47 @@
-FROM debian:bullseye-slim as builder
-RUN mkdir -p /src  && mkdir -p /opt
+FROM ubuntu:22.04
 
-RUN NPROC=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || 1) && \
-    apt-get -y --no-install-recommends install ca-certificates cmake make git gcc g++ libbz2-dev libxml2-dev wget \
-    libzip-dev libboost1.74-all-dev lua5.4 liblua5.4-dev pkg-config -o APT::Install-Suggests=0 -o APT::Install-Recommends=0
+ENV OSRM_VERSION="5.27.1"
 
-RUN NPROC=${BUILD_CONCURRENCY:-$(nproc)} && \
-    ldconfig /usr/local/lib && \
-    git clone --branch v2021.3.0 --single-branch https://github.com/oneapi-src/oneTBB.git && \
-    cd oneTBB && \
-    mkdir build && \
-    cd build && \
-    cmake -DTBB_TEST=OFF -DCMAKE_BUILD_TYPE=Release ..  && \
-    cmake --build . && \
-    cmake --install .
-
-COPY . /src
-WORKDIR /src
-
-RUN NPROC=${BUILD_CONCURRENCY:-$(nproc)} && \
-    echo "Building OSRM" && \
-    git show --format="%H" | head -n1 > /opt/OSRM_GITSHA && \
-    echo "Building OSRM gitsha $(cat /opt/OSRM_GITSHA)" && \
-    mkdir -p build && \
-    cd build && \
-    BUILD_TYPE="Release" && \
-    ENABLE_ASSERTIONS="Off" && \
-    BUILD_TOOLS="Off" && \
-    echo "Building ${BUILD_TYPE} with ENABLE_ASSERTIONS=${ENABLE_ASSERTIONS} BUILD_TOOLS=${BUILD_TOOLS}" && \
-    cmake .. -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DENABLE_ASSERTIONS=${ENABLE_ASSERTIONS} -DBUILD_TOOLS=${BUILD_TOOLS} -DENABLE_LTO=On && \
-    make -j${NPROC} install && \
-    cd ../profiles && \
-    cp -r * /opt && \
-    strip /usr/local/bin/* && \
-    rm -rf /src
-
-
-# Multistage build to reduce image size - https://docs.docker.com/engine/userguide/eng-image/multistage-build/#use-multi-stage-builds
-# Only the content below ends up in the image, this helps remove /src from the image (which is large)
-FROM debian:bullseye-slim as runstage
-
-COPY --from=builder /usr/local /usr/local
-COPY --from=builder /opt /opt
+WORKDIR /workspace
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libboost-program-options1.74.0 libboost-regex1.74.0 \
-        libboost-date-time1.74.0 libboost-chrono1.74.0 libboost-filesystem1.74.0 \
-        libboost-iostreams1.74.0 libboost-system1.74.0 libboost-thread1.74.0 \
-        expat liblua5.4-0 && \
-    rm -rf /var/lib/apt/lists/* && \
-# add /usr/local/lib to ldconfig to allow loading libraries from there
-    ldconfig /usr/local/lib
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    ca-certificates \
+    gcc \
+    cmake \
+    pkg-config \
+    libbz2-dev \
+    libxml2-dev \
+    libzip-dev \
+    libboost-all-dev \
+    lua5.2 \
+    liblua5.2-dev \
+    libluabind-dev \
+    libstxxl-dev \
+    libxml2 \
+    libxml2-dev libosmpbf-dev libbz2-dev libzip-dev libprotobuf-dev \
+    libtbb-dev && \
+    # Clean up to reduce image size
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN /usr/local/bin/osrm-extract --help && \
-    /usr/local/bin/osrm-routed --help && \
-    /usr/local/bin/osrm-contract --help && \
-    /usr/local/bin/osrm-partition --help && \
-    /usr/local/bin/osrm-customize --help
+ADD https://github.com/Project-OSRM/osrm-backend/archive/v$OSRM_VERSION.tar.gz v$OSRM_VERSION.tar.gz
+RUN tar xzf v$OSRM_VERSION.tar.gz
 
-WORKDIR /opt
+RUN cd osrm-backend-${OSRM_VERSION} \
+    && export CC=$(which gcc) \
+    && export CXX=$(which g++) \
+    && mkdir -p build \
+    && cd build \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+    && cmake --build . \
+    && cmake --build . --target install
+
+
+COPY docker-entrypoint.sh /workspace/
+RUN chmod +x /workspace/docker-entrypoint.sh
+CMD ["/workspace/docker-entrypoint.sh"]
 
 EXPOSE 5000
